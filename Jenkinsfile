@@ -5,9 +5,6 @@ pipeline {
     GIT_REPO_URL = 'https://github.com/ali-rostom1/testCI-CD'
     DOCKER_CREDENTIALS_ID = 'dockerhub-credentials'
     VALID_SERVICES = 'auth-service,booking-service,payment-service'
-    // PR-specific variables
-    CHANGE_ID = "${env.CHANGE_ID ?: '0'}"  // Default to '0' for non-PR runs
-    CHANGE_TARGET = "${env.CHANGE_TARGET ?: 'main'}"
   }
 
   stages {
@@ -28,23 +25,20 @@ pipeline {
     }
 
     stage('Checkout PR') {
+      when {
+        expression { return env.CHANGE_ID }
+      }
       steps {
         script {
-          // Fail early if not a PR
-          if (env.CHANGE_ID == '0') {
-            error("Not a pull request. This pipeline requires PR triggers.")
-          }
-
           checkout([
             $class: 'GitSCM',
-            branches: [[name: 'FETCH_HEAD']],  // More reliable than pull/ID/head
+            branches: [[name: 'FETCH_HEAD']],
             extensions: [
               [$class: 'CleanBeforeCheckout'],
               [$class: 'CloneOption',
                depth: 1,
                shallow: true,
-               noTags: true,
-               honorRefspec: true]
+               noTags: true]
             ],
             userRemoteConfigs: [[
               url: env.GIT_REPO_URL,
@@ -52,22 +46,23 @@ pipeline {
               credentialsId: 'github_credentials'
             ]]
           ])
-          
-          // Verify PR commit is checked out
           sh 'git log -1 --oneline'
         }
       }
     }
 
     stage('Detect Changes') {
+      when {
+        expression { return env.CHANGE_ID }
+      }
       steps {
         script {
-          // Get target branch HEAD
-          sh "git fetch origin ${CHANGE_TARGET} --depth=1"
+          // Explicitly fetch target branch
+          sh "git fetch origin ${env.CHANGE_TARGET ?: 'main'} --depth=1"
           
           def changes = sh(
             script: """
-              git diff --name-only origin/${CHANGE_TARGET}...HEAD -- \
+              git diff --name-only origin/${env.CHANGE_TARGET ?: 'main'}...HEAD -- \
               | cut -d/ -f1 \
               | sort -u \
               | grep -vE '^\\.'
@@ -92,7 +87,10 @@ pipeline {
 
     stage('Build PR Images') {
       when {
-        expression { return env.AFFECTED_SERVICES }
+        allOf {
+          expression { return env.CHANGE_ID }
+          expression { return env.AFFECTED_SERVICES }
+        }
       }
       steps {
         script {
@@ -104,12 +102,13 @@ pipeline {
               usernameVariable: 'DOCKER_USER',
               passwordVariable: 'DOCKER_PASS'
             )]) {
-              sh """
-                docker build -t alirostom220/${env.AFFECTED_SERVICES}:${prTag} .
-                echo \$DOCKER_PASS | docker login -u \$DOCKER_USER --password-stdin
-                docker push alirostom220/${env.AFFECTED_SERVICES}:${prTag}
+              sh '''#!/bin/bash
+                echo "Building Docker image..."
+                docker build -t alirostom220/${AFFECTED_SERVICES}:${prTag} .
+                echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
+                docker push "alirostom220/${AFFECTED_SERVICES}:${prTag}"
                 docker logout
-              """
+              '''
             }
           }
         }
@@ -120,10 +119,10 @@ pipeline {
   post {
     always {
       script {
-        if (env.CHANGE_ID != '0') {
+        if (env.CHANGE_ID) {
           def status = currentBuild.result == 'SUCCESS' ? 'success' : 'failure'
           withCredentials([string(credentialsId: 'github-token', variable: 'GITHUB_TOKEN')]) {
-            sh '''
+            sh '''#!/bin/bash
               curl -sS -X POST \
                 -H "Authorization: token $GITHUB_TOKEN" \
                 -H "Accept: application/vnd.github.v3+json" \
