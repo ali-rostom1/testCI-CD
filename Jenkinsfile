@@ -32,7 +32,7 @@ pipeline {
           passwordVariable: 'GIT_PASSWORD'
         )]) {
           sh '''
-            git config --global url."https://${GIT_USERNAME}:${GIT_PASSWORD}@github.com".insteadOf "https://github.com"
+            git config --global url."https://${GIT_USERNAME}:${GIT_PASSWORD}@github.com"
             git fetch origin '+refs/heads/*:refs/remotes/origin/*' --update-head-ok
             git fetch origin '+refs/pull/*:refs/remotes/origin/pr/*' --update-head-ok
           '''
