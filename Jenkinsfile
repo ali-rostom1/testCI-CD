@@ -1,8 +1,5 @@
 pipeline {
   agent any
-  triggers {
-        GitHubPush() 
-  }
 
   environment {
     GIT_REPO_URL = 'https://github.com/ali-rostom1/testCI-CD'
