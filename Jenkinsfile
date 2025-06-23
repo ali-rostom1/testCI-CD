@@ -11,7 +11,14 @@ pipeline {
   stages {
     stage('Checkout') {
       steps {
-        git branch: 'main', url: "${env.GIT_REPO_URL}"
+        checkout([
+          $class: 'GitSCM',
+          branches: [[name: '*/main']],
+          userRemoteConfigs: [[
+            url: 'https://github.com/ali-rostom1/testCI-CD.git',
+            credentialsId: 'github_credentials'
+          ]]
+        ])
       }
     }
 
