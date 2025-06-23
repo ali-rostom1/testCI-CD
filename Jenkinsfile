@@ -5,7 +5,7 @@ pipeline {
     GIT_REPO_URL = 'https://github.com/ali-rostom1/adtripy'
     DOCKER_CREDENTIALS_ID = 'dockerhub-credentials'
     //KUBECONFIG_CREDENTIALS_ID = 'kubeconfig-creds'
-    VALID_SERVICES = 'auth-service', 'booking-service', 'payment-service'
+    VALID_SERVICES = 'auth-service,booking-service,payment-service'
   }
 
   stages {
@@ -23,7 +23,7 @@ pipeline {
             returnStdout: true
           ).trim().split("\n")
 
-          def affected = changes.findAll { service -> VALID_SERVICES.contains(service) }
+          def affected = changes.findAll { service -> env.VALID_SERVICES.split(",").contains(service) }
 
           if (affected.isEmpty()) {
             currentBuild.result = 'SUCCESS'
