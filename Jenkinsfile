@@ -1,6 +1,6 @@
 pipeline {
     agent any
-
+  
     // Environment variables for GitHub webhook data (if available)
     environment {
         GITHUB_EVENT = "${env.GITHUB_EVENT_NAME ?: 'manual'}"  // 'pull_request', 'push', etc.
