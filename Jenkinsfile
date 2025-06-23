@@ -14,24 +14,53 @@ pipeline {
         checkout([
           $class: 'GitSCM',
           branches: [[name: '*/main']],
+          extensions: [[
+            $class: 'CloneOption',
+            depth: 0,  // Full clone history for proper diff
+            shallow: false
+          ]],
           userRemoteConfigs: [[
             url: 'https://github.com/ali-rostom1/testCI-CD.git',
             credentialsId: 'github_credentials'
           ]]
         ])
+        
+        // Ensure we have the full remote reference
+        sh 'git fetch origin'
       }
     }
 
     stage('Detect Changed Services') {
       steps {
         script {
-          def changes = sh(
-            script: "git diff --name-only origin/main...HEAD | cut -d/ -f1 | sort -u",
+          // Get the commit hash of the previous build on main
+          def previousCommit = sh(
+            script: "git rev-parse origin/main~1",
             returnStdout: true
-          ).trim().split("\n")
-
-          def affected = changes.findAll { service -> env.VALID_SERVICES.split(",").contains(service) }
-
+          ).trim()
+          
+          // Get current commit hash
+          def currentCommit = sh(
+            script: "git rev-parse HEAD",
+            returnStdout: true
+          ).trim()
+          
+          echo "Comparing changes between ${previousCommit} and ${currentCommit}"
+          
+          // Get changed files between previous and current commit
+          def changes = sh(
+            script: "git diff --name-only ${previousCommit} ${currentCommit} | cut -d/ -f1 | sort -u",
+            returnStdout: true
+          ).trim()
+          
+          echo "All changed directories: ${changes}"
+          
+          // Split changes and filter valid services
+          def changedList = changes.split("\n")
+          def affected = changedList.findAll { service -> 
+            env.VALID_SERVICES.split(",").contains(service) 
+          }
+          
           if (affected.isEmpty()) {
             currentBuild.result = 'SUCCESS'
             echo "No Laravel microservice changes detected. Skipping build."
@@ -39,13 +68,14 @@ pipeline {
           }
 
           env.AFFECTED_SERVICES = affected.join(",")
+          echo "Affected services: ${env.AFFECTED_SERVICES}"
         }
       }
     }
 
     stage('Build, Test & Deploy') {
       when {
-        expression { return env.AFFECTED_SERVICES }
+        expression { return env.AFFECTED_SERVICES?.trim() }
       }
       steps {
         script {
