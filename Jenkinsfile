@@ -15,24 +15,24 @@ pipeline {
           branches: [[name: '*/main']],
           extensions: [[
             $class: 'CloneOption',
-            depth: 0,  // Full clone history
+            depth: 0,
             shallow: false,
             noTags: false
           ]],
           userRemoteConfigs: [[
             url: env.GIT_REPO_URL,
-            credentialsId: 'github_credentials' 
+            credentialsId: 'github_credentials'
           ]]
         ])
         
-        // Use the same credentials for subsequent git operations
+        // Configure Git to use credentials
         withCredentials([usernamePassword(
           credentialsId: 'github_credentials',
-          usernameVariable: 'GIT_USERNAME',
-          passwordVariable: 'GIT_PASSWORD'
+          usernameVariable: 'GIT_USER',
+          passwordVariable: 'GIT_PASS'
         )]) {
           sh '''
-            git config --global url."https://${GIT_USERNAME}:${GIT_PASSWORD}@github.com".insteadOf "https://github.com"
+            git config --global url."https://${GIT_USER}:${GIT_PASS}@github.com".insteadOf "https://github.com"
             git fetch origin '+refs/heads/*:refs/remotes/origin/*' --update-head-ok
             git fetch origin '+refs/pull/*:refs/remotes/origin/pr/*' --update-head-ok
           '''
@@ -43,36 +43,42 @@ pipeline {
     stage('Detect Changed Services') {
       steps {
         script {
-          // Find merge base with target branch (main)
-          def mergeBase = sh(
-            script: "git merge-base HEAD origin/main",
+          // Get the previous successful commit on this branch
+          def previousCommit = sh(
+            script: "git rev-parse HEAD~1",
             returnStdout: true
           ).trim()
           
-          echo "Merge base with main: ${mergeBase}"
+          // Get current commit
+          def currentCommit = sh(
+            script: "git rev-parse HEAD",
+            returnStdout: true
+          ).trim()
           
-          // Get all changed files since branching from main
+          echo "Comparing changes between ${previousCommit} and ${currentCommit}"
+          
+          // Get changed files between commits
           def changes = sh(
-            script: "git diff --name-only ${mergeBase}..HEAD | cut -d/ -f1 | sort -u",
+            script: "git diff --name-only ${previousCommit} ${currentCommit} | cut -d/ -f1 | sort -u",
             returnStdout: true
           ).trim()
           
-          echo "All changed top-level directories: ${changes}"
+          echo "Raw changed directories:\n${changes}"
           
-          // Split changes and filter valid services
-          def changedList = changes ? changes.split("\n") : []
-          def affected = changedList.findAll { service -> 
-            env.VALID_SERVICES.split(",").contains(service.trim()) 
+          // Split and filter valid services
+          def changedList = changes.split("\n").collect { it.trim() }.findAll { it }
+          def affected = changedList.findAll { service ->
+            env.VALID_SERVICES.split(",")*.trim().contains(service)
           }
           
           if (affected.isEmpty()) {
             currentBuild.result = 'SUCCESS'
-            echo "No microservice changes detected. Skipping build."
+            echo "No service changes detected in: ${env.VALID_SERVICES}"
             return
           }
 
           env.AFFECTED_SERVICES = affected.join(",")
-          echo "Affected services: ${env.AFFECTED_SERVICES}"
+          echo "Detected changes in services: ${env.AFFECTED_SERVICES}"
         }
       }
     }
