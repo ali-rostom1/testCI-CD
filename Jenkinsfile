@@ -1,6 +1,15 @@
 pipeline {
   agent any
 
+  // Enable GitHub PR triggers
+  triggers {
+    githubPullRequest(
+      useGitHubHooks: true,
+      permitAll: false,
+      autoCloseFailedPullRequests: false
+    )
+  }
+
   environment {
     GIT_REPO_URL = 'https://github.com/ali-rostom1/testCI-CD'
     DOCKER_CREDENTIALS_ID = 'dockerhub-credentials'
@@ -8,26 +17,25 @@ pipeline {
   }
 
   stages {
-    stage('Check Docker Setup') {
+    stage('Verify PR Context') {
       steps {
         script {
-          def dockerAvailable = sh(
-            script: 'command -v docker || true',
-            returnStdout: true
-          ).trim()
+          // Debug all environment variables
+          sh 'printenv | sort'
           
-          if (!dockerAvailable) {
-            error("Docker not found! Ensure Docker is installed and the Jenkins user has permissions.")
+          // Check for GitHub PR variables
+          if (!env.CHANGE_ID && !env.ghprbPullId) {
+            error("Not running as a PR build. CHANGE_ID and ghprbPullId are both missing.")
           }
-          sh 'docker --version && docker info'
+          
+          // Set consistent PR ID variable
+          env.PR_ID = env.CHANGE_ID ?: env.ghprbPullId
+          echo "Building PR #${env.PR_ID}"
         }
       }
     }
 
-    stage('Checkout PR') {
-      when {
-        expression { return env.CHANGE_ID }
-      }
+    stage('Checkout PR Code') {
       steps {
         script {
           checkout([
@@ -42,27 +50,25 @@ pipeline {
             ],
             userRemoteConfigs: [[
               url: env.GIT_REPO_URL,
-              refspec: "+refs/pull/${env.CHANGE_ID}/head:refs/remotes/origin/PR-${env.CHANGE_ID}",
+              refspec: "+refs/pull/${env.PR_ID}/head:refs/remotes/origin/PR-${env.PR_ID}",
               credentialsId: 'github_credentials'
             ]]
           ])
-          sh 'git log -1 --oneline'
+          sh 'git show-ref && git log -1'
         }
       }
     }
 
-    stage('Detect Changes') {
-      when {
-        expression { return env.CHANGE_ID }
-      }
+    stage('Detect Changed Services') {
       steps {
         script {
-          // Explicitly fetch target branch
-          sh "git fetch origin ${env.CHANGE_TARGET ?: 'main'} --depth=1"
+          // Get target branch (default to main)
+          def targetBranch = env.CHANGE_TARGET ?: 'main'
+          sh "git fetch origin ${targetBranch} --depth=1"
           
           def changes = sh(
             script: """
-              git diff --name-only origin/${env.CHANGE_TARGET ?: 'main'}...HEAD -- \
+              git diff --name-only origin/${targetBranch}...HEAD -- \
               | cut -d/ -f1 \
               | sort -u \
               | grep -vE '^\\.'
@@ -78,23 +84,16 @@ pipeline {
             echo "Changes detected in: ${env.AFFECTED_SERVICES}"
           } else {
             currentBuild.result = 'SUCCESS'
-            echo "No relevant service changes detected."
-            return
+            error("No changes in monitored services. Stopping pipeline.")
           }
         }
       }
     }
 
-    stage('Build PR Images') {
-      when {
-        allOf {
-          expression { return env.CHANGE_ID }
-          expression { return env.AFFECTED_SERVICES }
-        }
-      }
+    stage('Build and Push') {
       steps {
         script {
-          def prTag = "pr-${env.CHANGE_ID}-${env.BUILD_NUMBER}"
+          def prTag = "pr-${env.PR_ID}-${env.BUILD_NUMBER}"
           
           dir(env.AFFECTED_SERVICES) {
             withCredentials([usernamePassword(
@@ -117,22 +116,29 @@ pipeline {
   }
 
   post {
-    always {
+    success {
       script {
-        if (env.CHANGE_ID) {
-          def status = currentBuild.result == 'SUCCESS' ? 'success' : 'failure'
+        withCredentials([string(credentialsId: 'github-token', variable: 'GITHUB_TOKEN')]) {
+          sh '''#!/bin/bash
+            curl -sS -X POST \
+              -H "Authorization: token $GITHUB_TOKEN" \
+              -H "Accept: application/vnd.github.v3+json" \
+              "https://api.github.com/repos/ali-rostom1/testCI-CD/issues/${PR_ID}/comments" \
+              -d '{"body":"✅ PR Build Successful!\\nServices: ${AFFECTED_SERVICES}\\nImages: alirostom220/${AFFECTED_SERVICES}:pr-${PR_ID}-${BUILD_NUMBER}"}'
+          '''
+        }
+      }
+    }
+    failure {
+      script {
+        if (env.PR_ID) {
           withCredentials([string(credentialsId: 'github-token', variable: 'GITHUB_TOKEN')]) {
             sh '''#!/bin/bash
               curl -sS -X POST \
                 -H "Authorization: token $GITHUB_TOKEN" \
                 -H "Accept: application/vnd.github.v3+json" \
-                "https://api.github.com/repos/ali-rostom1/testCI-CD/statuses/$(git rev-parse HEAD)" \
-                -d '{
-                  "state": "'"${status}"'",
-                  "target_url": "'"${BUILD_URL}"'",
-                  "description": "Jenkins CI",
-                  "context": "ci/jenkins"
-                }'
+                "https://api.github.com/repos/ali-rostom1/testCI-CD/issues/${PR_ID}/comments" \
+                -d '{"body":"❌ PR Build Failed!\\nCheck logs: ${BUILD_URL}"}'
             '''
           }
         }
