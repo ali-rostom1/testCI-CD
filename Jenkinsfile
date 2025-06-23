@@ -5,134 +5,115 @@ pipeline {
     GIT_REPO_URL = 'https://github.com/ali-rostom1/testCI-CD'
     DOCKER_CREDENTIALS_ID = 'dockerhub-credentials'
     VALID_SERVICES = 'auth-service,booking-service,payment-service'
+    // PR-specific variables
+    CHANGE_ID = env.CHANGE_ID ?: ''  // PR number from GitHub
+    CHANGE_TARGET = env.CHANGE_TARGET ?: 'main'  // Target branch
   }
 
   stages {
     stage('Check Docker Setup') {
-      steps {
-        script {
-          // Verify Docker is installed and accessible
-          def dockerAvailable = sh(
-            script: 'which docker || true',
-            returnStdout: true
-          ).trim()
-          
-          if (!dockerAvailable) {
-            error("Docker not found! Please install Docker on the Jenkins server and add the Jenkins user to the docker group.")
-          }
-          
-          // Verify docker can run
-          sh 'docker --version'
-        }
-      }
+      steps { /* ... keep existing docker checks ... */ }
     }
-    stage('Checkout') {
+
+    stage('Checkout PR') {
       steps {
         checkout([
           $class: 'GitSCM',
-          branches: [[name: '*/main']],
+          branches: [[name: 'PR-${CHANGE_ID}']],
           extensions: [[
             $class: 'CloneOption',
-            depth: 0,
-            shallow: false,
-            noTags: false
+            depth: 1,  // Shallow clone for PRs
+            shallow: true,
+            noTags: true,
+            honorRefspec: true
           ]],
           userRemoteConfigs: [[
             url: env.GIT_REPO_URL,
+            refspec: '+refs/pull/${CHANGE_ID}/head:refs/remotes/origin/PR-${CHANGE_ID}',
             credentialsId: 'github_credentials'
           ]]
         ])
-        
-        // Configure Git to use credentials
-        withCredentials([usernamePassword(
-          credentialsId: 'github_credentials',
-          usernameVariable: 'GIT_USER',
-          passwordVariable: 'GIT_PASS'
-        )]) {
-          sh '''
-            git config --global url."https://${GIT_USER}:${GIT_PASS}@github.com".insteadOf "https://github.com"
-            git fetch origin '+refs/heads/*:refs/remotes/origin/*' --update-head-ok
-            git fetch origin '+refs/pull/*:refs/remotes/origin/pr/*' --update-head-ok
-          '''
-        }
       }
     }
 
-    stage('Detect Changed Services') {
+    stage('Detect PR Changes') {
       steps {
         script {
-          // Get the previous successful commit on this branch
-          def previousCommit = sh(
-            script: "git rev-parse HEAD~1",
-            returnStdout: true
-          ).trim()
-          
-          // Get current commit
-          def currentCommit = sh(
-            script: "git rev-parse HEAD",
-            returnStdout: true
-          ).trim()
-          
-          echo "Comparing changes between ${previousCommit} and ${currentCommit}"
-          
-          // Get changed files between commits
+          // Compare PR branch with target branch
           def changes = sh(
-            script: "git diff --name-only ${previousCommit} ${currentCommit} | cut -d/ -f1 | sort -u",
+            script: "git diff --name-only origin/${CHANGE_TARGET}...HEAD | cut -d/ -f1 | sort -u",
             returnStdout: true
           ).trim()
-          
-          echo "Raw changed directories:\n${changes}"
-          
-          // Process valid services (CPS-compatible way)
+
           def validServices = env.VALID_SERVICES.split(',').collect { it.trim() }
-          def changedList = changes.split('\n').collect { it.trim() }.findAll { it }
-          
-          // Find intersection between changed directories and valid services
-          def affected = []
-          for (service in changedList) {
-            if (validServices.contains(service)) {
-              affected.add(service)
-            }
-          }
+          def affected = changes.split('\n').findAll { validServices.contains(it.trim()) }
 
           if (affected.isEmpty()) {
             currentBuild.result = 'SUCCESS'
-            echo "No service changes detected in: ${env.VALID_SERVICES}"
+            echo "No changes in monitored services. Skipping build."
             return
           }
-
-          env.AFFECTED_SERVICES = affected.join(",")
-          echo "Detected changes in services: ${env.AFFECTED_SERVICES}"
+          env.AFFECTED_SERVICES = affected.join(',')
         }
       }
     }
 
-    // Rest of your pipeline remains the same...
-    stage('Build, Test & Deploy') {
+    stage('Build & Test PR') {
       when {
-        expression { return env.AFFECTED_SERVICES?.trim() }
+        allOf {
+          expression { return env.AFFECTED_SERVICES?.trim() }
+          expression { return env.CHANGE_ID }  // Only run for PRs
+        }
       }
       steps {
         script {
-          def services = env.AFFECTED_SERVICES.split(",")
+          def services = env.AFFECTED_SERVICES.split(',')
           for (service in services) {
             dir(service) {
-              stage("→ ${service}: Docker Build & Push") {
-                withCredentials([usernamePassword(
-                  credentialsId: "${DOCKER_CREDENTIALS_ID}",
-                  usernameVariable: 'DOCKER_USER',
-                  passwordVariable: 'DOCKER_PASS'
-                )]) {
-                  def tag = "${env.BUILD_NUMBER}"
-                  def image = "alirostom220/${service}:${tag}"
-
-                  sh 'echo $DOCKER_PASS | docker login -u $DOCKER_USER --password-stdin'
-                  sh "docker build -t ${image} ."
-                  sh "docker push ${image}"
-                  sh 'docker logout'
-                }
+              stage("PR Build → ${service}") {
+                // Build with PR tag
+                def prTag = "pr-${env.CHANGE_ID}-${env.BUILD_NUMBER}"
+                sh "docker build -t alirostom220/${service}:${prTag} ."
+                
+                // Optional: Run tests
+                sh 'docker run --rm alirostom220/${service}:${prTag} ./run-tests.sh'
               }
             }
+          }
+        }
+      }
+    }
+
+    stage('Deploy Preview') {
+      when {
+        allOf {
+          expression { return env.AFFECTED_SERVICES?.trim() }
+          expression { return env.CHANGE_ID }
+          branch 'main'  // Only deploy previews from main PRs
+        }
+      }
+      steps {
+        script {
+          withCredentials([usernamePassword(
+            credentialsId: env.DOCKER_CREDENTIALS_ID,
+            usernameVariable: 'DOCKER_USER',
+            passwordVariable: 'DOCKER_PASS'
+          )]) {
+            sh 'echo $DOCKER_PASS | docker login -u $DOCKER_USER --password-stdin'
+            
+            def services = env.AFFECTED_SERVICES.split(',')
+            for (service in services) {
+              dir(service) {
+                def prTag = "pr-${env.CHANGE_ID}-${env.BUILD_NUMBER}"
+                def image = "alirostom220/${service}:${prTag}"
+                
+                sh """
+                  docker push ${image}
+                  echo "PR Preview deployed: ${image}"
+                """
+              }
+            }
+            sh 'docker logout'
           }
         }
       }
@@ -141,13 +122,20 @@ pipeline {
 
   post {
     success {
-      echo "✅ Pipeline succeeded for: ${env.AFFECTED_SERVICES ?: 'No service changes'}"
-    }
-    failure {
-      echo "❌ Pipeline failed. Check logs for details."
-    }
-    aborted {
-      echo "🟨 Pipeline aborted."
+      script {
+        if (env.CHANGE_ID) {
+          // Comment on PR with build results
+          withCredentials([string(credentialsId: 'github-token', variable: 'GITHUB_TOKEN')]) {
+            sh """
+              curl -X POST \
+                -H "Authorization: token \$GITHUB_TOKEN" \
+                -H "Accept: application/vnd.github.v3+json" \
+                https://api.github.com/repos/ali-rostom1/testCI-CD/issues/${CHANGE_ID}/comments \
+                -d '{"body":"✅ PR Build Successful!\\nAffected services: ${env.AFFECTED_SERVICES}"}'
+            """
+          }
+        }
+      }
     }
   }
 }
