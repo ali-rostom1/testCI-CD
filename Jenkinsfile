@@ -5,132 +5,112 @@ pipeline {
     GIT_REPO_URL = 'https://github.com/ali-rostom1/testCI-CD'
     DOCKER_CREDENTIALS_ID = 'dockerhub-credentials'
     VALID_SERVICES = 'auth-service,booking-service,payment-service'
-    // PR-specific variables (properly quoted)
-    CHANGE_ID = "${env.CHANGE_ID ?: ''}"  // PR number from GitHub
-    CHANGE_TARGET = "${env.CHANGE_TARGET ?: 'main'}"  // Target branch
+    // PR-specific variables
+    CHANGE_ID = "${env.CHANGE_ID ?: '0'}"  // Default to '0' for non-PR runs
+    CHANGE_TARGET = "${env.CHANGE_TARGET ?: 'main'}"
   }
 
   stages {
     stage('Check Docker Setup') {
       steps {
         script {
-          // Verify Docker is installed and accessible
           def dockerAvailable = sh(
-            script: 'which docker || true',
+            script: 'command -v docker || true',
             returnStdout: true
           ).trim()
           
           if (!dockerAvailable) {
-            error("Docker not found! Please install Docker on the Jenkins server and add the Jenkins user to the docker group.")
+            error("Docker not found! Ensure Docker is installed and the Jenkins user has permissions.")
           }
-          
-          // Verify docker can run
-          sh 'docker --version'
+          sh 'docker --version && docker info'
         }
       }
     }
 
     stage('Checkout PR') {
       steps {
-        checkout([
-          $class: 'GitSCM',
-          branches: [[name: 'PR-${CHANGE_ID}']],
-          extensions: [[
-            $class: 'CloneOption',
-            depth: 1,  // Shallow clone for PRs
-            shallow: true,
-            noTags: true,
-            honorRefspec: true
-          ]],
-          userRemoteConfigs: [[
-            url: env.GIT_REPO_URL,
-            refspec: '+refs/pull/${CHANGE_ID}/head:refs/remotes/origin/PR-${CHANGE_ID}',
-            credentialsId: 'github_credentials'
-          ]]
-        ])
+        script {
+          // Fail early if not a PR
+          if (env.CHANGE_ID == '0') {
+            error("Not a pull request. This pipeline requires PR triggers.")
+          }
+
+          checkout([
+            $class: 'GitSCM',
+            branches: [[name: 'FETCH_HEAD']],  // More reliable than pull/ID/head
+            extensions: [
+              [$class: 'CleanBeforeCheckout'],
+              [$class: 'CloneOption',
+               depth: 1,
+               shallow: true,
+               noTags: true,
+               honorRefspec: true]
+            ],
+            userRemoteConfigs: [[
+              url: env.GIT_REPO_URL,
+              refspec: "+refs/pull/${env.CHANGE_ID}/head:refs/remotes/origin/PR-${env.CHANGE_ID}",
+              credentialsId: 'github_credentials'
+            ]]
+          ])
+          
+          // Verify PR commit is checked out
+          sh 'git log -1 --oneline'
+        }
       }
     }
 
-    stage('Detect PR Changes') {
+    stage('Detect Changes') {
       steps {
         script {
-          // Compare PR branch with target branch
+          // Get target branch HEAD
+          sh "git fetch origin ${CHANGE_TARGET} --depth=1"
+          
           def changes = sh(
-            script: "git diff --name-only origin/${CHANGE_TARGET}...HEAD | cut -d/ -f1 | sort -u",
+            script: """
+              git diff --name-only origin/${CHANGE_TARGET}...HEAD -- \
+              | cut -d/ -f1 \
+              | sort -u \
+              | grep -vE '^\\.'
+            """,
             returnStdout: true
           ).trim()
 
           def validServices = env.VALID_SERVICES.split(',').collect { it.trim() }
-          def changedList = changes.split('\n').collect { it.trim() }.findAll { it }
-          def affected = changedList.findAll { validServices.contains(it) }
+          def affected = changes.split('\n').findAll { it in validServices }
 
-          if (affected.isEmpty()) {
+          if (affected) {
+            env.AFFECTED_SERVICES = affected.join(',')
+            echo "Changes detected in: ${env.AFFECTED_SERVICES}"
+          } else {
             currentBuild.result = 'SUCCESS'
-            echo "No changes in monitored services. Skipping build."
+            echo "No relevant service changes detected."
             return
           }
-          env.AFFECTED_SERVICES = affected.join(',')
-          echo "Detected changes in services: ${env.AFFECTED_SERVICES}"
         }
       }
     }
 
-    stage('Build & Test PR') {
+    stage('Build PR Images') {
       when {
-        allOf {
-          expression { return env.AFFECTED_SERVICES?.trim() }
-          expression { return env.CHANGE_ID }  // Only run for PRs
-        }
+        expression { return env.AFFECTED_SERVICES }
       }
       steps {
         script {
-          def services = env.AFFECTED_SERVICES.split(',')
-          for (service in services) {
-            dir(service) {
-              stage("PR Build → ${service}") {
-                // Build with PR tag
-                def prTag = "pr-${env.CHANGE_ID}-${env.BUILD_NUMBER}"
-                sh "docker build -t alirostom220/${service}:${prTag} ."
-                
-                // Optional test command (uncomment if needed)
-                // sh "docker run --rm alirostom220/${service}:${prTag} ./run-tests.sh"
-              }
+          def prTag = "pr-${env.CHANGE_ID}-${env.BUILD_NUMBER}"
+          
+          dir(env.AFFECTED_SERVICES) {
+            withCredentials([usernamePassword(
+              credentialsId: env.DOCKER_CREDENTIALS_ID,
+              usernameVariable: 'DOCKER_USER',
+              passwordVariable: 'DOCKER_PASS'
+            )]) {
+              sh """
+                docker build -t alirostom220/${env.AFFECTED_SERVICES}:${prTag} .
+                echo \$DOCKER_PASS | docker login -u \$DOCKER_USER --password-stdin
+                docker push alirostom220/${env.AFFECTED_SERVICES}:${prTag}
+                docker logout
+              """
             }
-          }
-        }
-      }
-    }
-
-    stage('Deploy Preview') {
-      when {
-        allOf {
-          expression { return env.AFFECTED_SERVICES?.trim() }
-          expression { return env.CHANGE_ID }
-          branch 'main'  // Only deploy previews from main PRs
-        }
-      }
-      steps {
-        script {
-          withCredentials([usernamePassword(
-            credentialsId: env.DOCKER_CREDENTIALS_ID,
-            usernameVariable: 'DOCKER_USER',
-            passwordVariable: 'DOCKER_PASS'
-          )]) {
-            sh 'echo $DOCKER_PASS | docker login -u $DOCKER_USER --password-stdin'
-            
-            def services = env.AFFECTED_SERVICES.split(',')
-            for (service in services) {
-              dir(service) {
-                def prTag = "pr-${env.CHANGE_ID}-${env.BUILD_NUMBER}"
-                def image = "alirostom220/${service}:${prTag}"
-                
-                sh """
-                  docker push ${image}
-                  echo "PR Preview deployed: ${image}"
-                """
-              }
-            }
-            sh 'docker logout'
           }
         }
       }
@@ -138,24 +118,26 @@ pipeline {
   }
 
   post {
-    success {
+    always {
       script {
-        if (env.CHANGE_ID) {
-          // Comment on PR with build results (requires github-token credential)
+        if (env.CHANGE_ID != '0') {
+          def status = currentBuild.result == 'SUCCESS' ? 'success' : 'failure'
           withCredentials([string(credentialsId: 'github-token', variable: 'GITHUB_TOKEN')]) {
             sh """
               curl -sS -X POST \
                 -H "Authorization: token \$GITHUB_TOKEN" \
                 -H "Accept: application/vnd.github.v3+json" \
-                "https://api.github.com/repos/ali-rostom1/testCI-CD/issues/${CHANGE_ID}/comments" \
-                -d '{"body":"✅ PR Build Successful!\\nAffected services: ${env.AFFECTED_SERVICES}\\nPreview images pushed with tag: pr-${CHANGE_ID}-${env.BUILD_NUMBER}"}'
+                "https://api.github.com/repos/ali-rostom1/testCI-CD/statuses/$(git rev-parse HEAD)" \
+                -d '{
+                  "state": "${status}",
+                  "target_url": "${env.BUILD_URL}",
+                  "description": "Jenkins CI",
+                  "context": "ci/jenkins"
+                }'
             """
           }
         }
       }
-    }
-    failure {
-      echo "❌ Pipeline failed. Check logs for details."
     }
   }
 }
