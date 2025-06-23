@@ -13,19 +13,28 @@ pipeline {
   stages {
     stage('Checkout PR Code') {
       steps {
-        checkout([
-          $class: 'GitSCM',
-          branches: [[name: "refs/pull/${env.PR_ID}/head"]],
-          extensions: [
-            [$class: 'CleanBeforeCheckout'],
-            [$class: 'CloneOption', depth: 1, shallow: true, noTags: true]
-          ],
-          userRemoteConfigs: [[
-            url: 'https://github.com/ali-rostom1/testCI-CD',
-            refspec: "+refs/pull/${env.PR_ID}/head:refs/remotes/origin/PR-${env.PR_ID}",
-            credentialsId: 'github_credentials'
-          ]]
-        ])
+        script {
+          // Debug: Print all environment variables
+          sh 'env | sort'
+          
+          // Fallback PR detection when CHANGE_ID is missing
+          env.PR_ID = env.CHANGE_ID ?: env.ghprbPullId ?: getPrIdFromBranch()
+          echo "Using PR ID: ${env.PR_ID}"
+          
+          checkout([
+            $class: 'GitSCM',
+            branches: [[name: "refs/pull/${env.PR_ID}/head"]],
+            extensions: [
+              [$class: 'CleanBeforeCheckout'],
+              [$class: 'CloneOption', depth: 1, shallow: true, noTags: true]
+            ],
+            userRemoteConfigs: [[
+              url: 'https://github.com/ali-rostom1/testCI-CD',
+              refspec: "+refs/pull/${env.PR_ID}/head:refs/remotes/origin/PR-${env.PR_ID}",
+              credentialsId: 'github_credentials'
+            ]]
+          ])
+        }
       }
     }
 
