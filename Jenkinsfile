@@ -8,6 +8,24 @@ pipeline {
   }
 
   stages {
+    stage('Check Docker Setup') {
+      steps {
+        script {
+          // Verify Docker is installed and accessible
+          def dockerAvailable = sh(
+            script: 'which docker || true',
+            returnStdout: true
+          ).trim()
+          
+          if (!dockerAvailable) {
+            error("Docker not found! Please install Docker on the Jenkins server and add the Jenkins user to the docker group.")
+          }
+          
+          // Verify docker can run
+          sh 'docker --version'
+        }
+      }
+    }
     stage('Checkout') {
       steps {
         checkout([
