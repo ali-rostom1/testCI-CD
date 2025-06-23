@@ -65,12 +65,18 @@ pipeline {
           
           echo "Raw changed directories:\n${changes}"
           
-          // Split and filter valid services
-          def changedList = changes.split("\n").collect { it.trim() }.findAll { it }
-          def affected = changedList.findAll { service ->
-            VALID_SERVICES.split(",")*.trim().contains(service)
-          }
+          // Process valid services (CPS-compatible way)
+          def validServices = env.VALID_SERVICES.split(',').collect { it.trim() }
+          def changedList = changes.split('\n').collect { it.trim() }.findAll { it }
           
+          // Find intersection between changed directories and valid services
+          def affected = []
+          for (service in changedList) {
+            if (validServices.contains(service)) {
+              affected.add(service)
+            }
+          }
+
           if (affected.isEmpty()) {
             currentBuild.result = 'SUCCESS'
             echo "No service changes detected in: ${env.VALID_SERVICES}"
