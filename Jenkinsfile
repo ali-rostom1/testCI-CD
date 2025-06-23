@@ -68,7 +68,7 @@ pipeline {
           // Split and filter valid services
           def changedList = changes.split("\n").collect { it.trim() }.findAll { it }
           def affected = changedList.findAll { service ->
-            env.VALID_SERVICES.split(",")*.trim().contains(service)
+            VALID_SERVICES.split(",")*.trim().contains(service)
           }
           
           if (affected.isEmpty()) {
