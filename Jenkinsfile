@@ -123,18 +123,18 @@ pipeline {
         if (env.CHANGE_ID != '0') {
           def status = currentBuild.result == 'SUCCESS' ? 'success' : 'failure'
           withCredentials([string(credentialsId: 'github-token', variable: 'GITHUB_TOKEN')]) {
-            sh """
+            sh '''
               curl -sS -X POST \
-                -H "Authorization: token \$GITHUB_TOKEN" \
+                -H "Authorization: token $GITHUB_TOKEN" \
                 -H "Accept: application/vnd.github.v3+json" \
                 "https://api.github.com/repos/ali-rostom1/testCI-CD/statuses/$(git rev-parse HEAD)" \
                 -d '{
-                  "state": "${status}",
-                  "target_url": "${env.BUILD_URL}",
+                  "state": "'"${status}"'",
+                  "target_url": "'"${BUILD_URL}"'",
                   "description": "Jenkins CI",
                   "context": "ci/jenkins"
                 }'
-            """
+            '''
           }
         }
       }
