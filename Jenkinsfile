@@ -1,15 +1,6 @@
 pipeline {
   agent any
 
-  // Enable GitHub PR triggers
-  triggers {
-    githubPullRequest(
-      useGitHubHooks: true,
-      permitAll: false,
-      autoCloseFailedPullRequests: false
-    )
-  }
-
   environment {
     GIT_REPO_URL = 'https://github.com/ali-rostom1/testCI-CD'
     DOCKER_CREDENTIALS_ID = 'dockerhub-credentials'
@@ -20,7 +11,7 @@ pipeline {
     stage('Verify PR Context') {
       steps {
         script {
-          // Debug all environment variables
+          // Debug all environment variables (optional)
           sh 'printenv | sort'
           
           // Check for GitHub PR variables
