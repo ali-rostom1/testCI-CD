@@ -2,7 +2,7 @@ pipeline {
   agent any
 
   environment {
-    GIT_REPO_URL = 'https://github.com/ali-rostom1/adtripy'
+    GIT_REPO_URL = 'https://github.com/ali-rostom1/testCI-CD'
     DOCKER_CREDENTIALS_ID = 'dockerhub-credentials'
     //KUBECONFIG_CREDENTIALS_ID = 'kubeconfig-creds'
     VALID_SERVICES = 'auth-service,booking-service,payment-service'
