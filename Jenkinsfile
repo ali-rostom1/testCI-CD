@@ -4,7 +4,6 @@ pipeline {
   environment {
     GIT_REPO_URL = 'https://github.com/ali-rostom1/testCI-CD'
     DOCKER_CREDENTIALS_ID = 'dockerhub-credentials'
-    //KUBECONFIG_CREDENTIALS_ID = 'kubeconfig-creds'
     VALID_SERVICES = 'auth-service,booking-service,payment-service'
   }
 
@@ -16,54 +15,59 @@ pipeline {
           branches: [[name: '*/main']],
           extensions: [[
             $class: 'CloneOption',
-            depth: 0,  // Full clone history for proper diff
-            shallow: false
+            depth: 0,  // Full clone history
+            shallow: false,
+            noTags: false
           ]],
           userRemoteConfigs: [[
-            url: 'https://github.com/ali-rostom1/testCI-CD.git',
-            credentialsId: 'github_credentials'
+            url: env.GIT_REPO_URL,
+            credentialsId: 'github_credentials' 
           ]]
         ])
         
-        // Ensure we have the full remote reference
-        sh 'git fetch origin'
+        // Use the same credentials for subsequent git operations
+        withCredentials([usernamePassword(
+          credentialsId: 'github_credentials',
+          usernameVariable: 'GIT_USERNAME',
+          passwordVariable: 'GIT_PASSWORD'
+        )]) {
+          sh '''
+            git config --global url."https://${GIT_USERNAME}:${GIT_PASSWORD}@github.com".insteadOf "https://github.com"
+            git fetch origin '+refs/heads/*:refs/remotes/origin/*' --update-head-ok
+            git fetch origin '+refs/pull/*:refs/remotes/origin/pr/*' --update-head-ok
+          '''
+        }
       }
     }
 
     stage('Detect Changed Services') {
       steps {
         script {
-          // Get the commit hash of the previous build on main
-          def previousCommit = sh(
-            script: "git rev-parse origin/main~1",
+          // Find merge base with target branch (main)
+          def mergeBase = sh(
+            script: "git merge-base HEAD origin/main",
             returnStdout: true
           ).trim()
           
-          // Get current commit hash
-          def currentCommit = sh(
-            script: "git rev-parse HEAD",
-            returnStdout: true
-          ).trim()
+          echo "Merge base with main: ${mergeBase}"
           
-          echo "Comparing changes between ${previousCommit} and ${currentCommit}"
-          
-          // Get changed files between previous and current commit
+          // Get all changed files since branching from main
           def changes = sh(
-            script: "git diff --name-only ${previousCommit} ${currentCommit} | cut -d/ -f1 | sort -u",
+            script: "git diff --name-only ${mergeBase}..HEAD | cut -d/ -f1 | sort -u",
             returnStdout: true
           ).trim()
           
-          echo "All changed directories: ${changes}"
+          echo "All changed top-level directories: ${changes}"
           
           // Split changes and filter valid services
-          def changedList = changes.split("\n")
+          def changedList = changes ? changes.split("\n") : []
           def affected = changedList.findAll { service -> 
-            env.VALID_SERVICES.split(",").contains(service) 
+            env.VALID_SERVICES.split(",").contains(service.trim()) 
           }
           
           if (affected.isEmpty()) {
             currentBuild.result = 'SUCCESS'
-            echo "No Laravel microservice changes detected. Skipping build."
+            echo "No microservice changes detected. Skipping build."
             return
           }
 
@@ -73,6 +77,7 @@ pipeline {
       }
     }
 
+    // Rest of your pipeline remains the same...
     stage('Build, Test & Deploy') {
       when {
         expression { return env.AFFECTED_SERVICES?.trim() }
@@ -82,12 +87,6 @@ pipeline {
           def services = env.AFFECTED_SERVICES.split(",")
           for (service in services) {
             dir(service) {
-              /*stage("→ ${service}: Test") {
-                sh 'cp .env.ci .env || true'
-                sh 'composer install --no-interaction --prefer-dist'
-                sh './vendor/bin/phpunit --testdox || true'
-              }*/
-
               stage("→ ${service}: Docker Build & Push") {
                 withCredentials([usernamePassword(
                   credentialsId: "${DOCKER_CREDENTIALS_ID}",
@@ -103,17 +102,6 @@ pipeline {
                   sh 'docker logout'
                 }
               }
-
-              /*stage("→ ${service}: Deploy to K8s") {
-                withCredentials([file(
-                  credentialsId: "${KUBECONFIG_CREDENTIALS_ID}",
-                  variable: 'KUBECONFIG'
-                )]) {
-                  def tag = "${env.BUILD_NUMBER}"
-                  def image = "your-docker-repo/${service}:${tag}"
-                  sh "kubectl --kubeconfig=$KUBECONFIG set image deployment/${service} ${service}=${image}"
-                }
-              }*/
             }
           }
         }
@@ -123,10 +111,13 @@ pipeline {
 
   post {
     success {
-      echo "✅ Auto-deployment complete for: ${env.AFFECTED_SERVICES ?: 'Nothing changed'}"
+      echo "✅ Pipeline succeeded for: ${env.AFFECTED_SERVICES ?: 'No service changes'}"
     }
     failure {
-      echo "❌ Build failed. Check logs for details."
+      echo "❌ Pipeline failed. Check logs for details."
+    }
+    aborted {
+      echo "🟨 Pipeline aborted."
     }
   }
 }
