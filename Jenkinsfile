@@ -124,7 +124,7 @@ pipeline {
                   passwordVariable: 'DOCKER_PASS'
                 )]) {
                   def tag = "${env.BUILD_NUMBER}"
-                  def image = "adtripy/${service}:${tag}"
+                  def image = "alirostom220/${service}:${tag}"
 
                   sh 'echo $DOCKER_PASS | docker login -u $DOCKER_USER --password-stdin'
                   sh "docker build -t ${image} ."
